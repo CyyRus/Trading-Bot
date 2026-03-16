@@ -1,5 +1,5 @@
 #property copyright "Cyy XAUUSD Survival Scalping Bot"
-#property version   "3.4"
+#property version   "3.5"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -17,7 +17,7 @@ input double MaxSpreadPoints   = 50;      // Max allowed spread (points)
 input string AllowedSymbol     = "XAUUSD";
 input int    H1TrendMAPeriod   = 50;      // H1 EMA period for trend filter
 input int    ConfirmCandles    = 2;       // Breakout confirmation candles
-input int    PullbackPips      = 25;      // Required pullback depth (pips)
+input int    PullbackPips      = 10;      // Required pullback depth (pips)
 input bool   EnableVolPause    = false;   // Pause on volatile hour edges
 
 //─── Globals ─────────────────────────────────────────────────────────────────
@@ -47,11 +47,16 @@ int OnInit()
 
    lastAlivePrint = TimeCurrent();   // prevent immediate heartbeat on startup
 
+   double effLot = NormalizeLot(LotSize);
    Print("=================================================================");
-   Print("Cyy Scalping Bot v3.4 | Symbol: ", _Symbol);
-   Print("Balance : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
-   Print("Equity  : ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),  2));
-   Print("Vol pause: ", EnableVolPause ? "ON" : "OFF");
+   Print("Cyy Scalping Bot v3.5 | Symbol: ", _Symbol);
+   Print("Balance    : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
+   Print("Equity     : ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),  2));
+   Print("LotSize    : ", DoubleToString(LotSize, 3),
+         " -> effective: ", DoubleToString(effLot, 3),
+         " (min=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 3),
+         " step=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), 3), ")");
+   Print("Vol pause  : ", EnableVolPause ? "ON" : "OFF");
    Print("=================================================================");
    return INIT_SUCCEEDED;
 }
@@ -129,6 +134,19 @@ bool IsSpreadAcceptable()
       return false;
    }
    return true;
+}
+
+// Snaps a desired lot size to the broker's valid min/step/max for this symbol.
+double NormalizeLot(double desiredLot)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(stepLot <= 0) stepLot = 0.01;
+
+   double lot = MathFloor(desiredLot / stepLot) * stepLot;
+   lot = MathMax(minLot, MathMin(maxLot, lot));
+   return NormalizeDouble(lot, 2);
 }
 
 //─── Strategy ────────────────────────────────────────────────────────────────
@@ -238,29 +256,30 @@ void OnTick()
    double slDist = StopLossPips                    * point * 10;
    double tpDist = StopLossPips * RiskRewardRatio  * point * 10;
 
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   bool   ok  = false;
+   double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double effLot = NormalizeLot(LotSize);
+   bool   ok     = false;
 
    if(signal == 1)
    {
       double sl = NormalizeDouble(ask - slDist, _Digits);
       double tp = NormalizeDouble(ask + tpDist, _Digits);
-      ok = trade.Buy(LotSize, _Symbol, ask, sl, tp, "Pullback Buy");
+      ok = trade.Buy(effLot, _Symbol, ask, sl, tp, "Pullback Buy");
       if(ok)
-         Print("BUY  | entry: ", ask, " | SL: ", sl, " | TP: ", tp);
+         Print("BUY  | lot: ", effLot, " | entry: ", ask, " | SL: ", sl, " | TP: ", tp);
       else
-         Print("BUY failed | error: ", GetLastError());
+         Print("BUY failed | lot: ", effLot, " | error: ", GetLastError());
    }
    else
    {
       double sl = NormalizeDouble(bid + slDist, _Digits);
       double tp = NormalizeDouble(bid - tpDist, _Digits);
-      ok = trade.Sell(LotSize, _Symbol, bid, sl, tp, "Pullback Sell");
+      ok = trade.Sell(effLot, _Symbol, bid, sl, tp, "Pullback Sell");
       if(ok)
-         Print("SELL | entry: ", bid, " | SL: ", sl, " | TP: ", tp);
+         Print("SELL | lot: ", effLot, " | entry: ", bid, " | SL: ", sl, " | TP: ", tp);
       else
-         Print("SELL failed | error: ", GetLastError());
+         Print("SELL failed | lot: ", effLot, " | error: ", GetLastError());
    }
 
    if(ok) lastTradeTime = TimeCurrent();
