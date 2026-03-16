@@ -1,12 +1,12 @@
 #property copyright "Cyy XAUUSD Survival Scalping Bot"
-#property version   "3.3"
+#property version   "3.4"
 #property strict
 
 #include <Trade\Trade.mqh>
 
 //─── Inputs ──────────────────────────────────────────────────────────────────
 input double LotSize           = 0.005;   // Lot size
-input int    StopLossPips      = 55;      // Stop loss in pips
+input int    StopLossPips      = 30;      // Stop loss in pips (reduced: ~$1.50 risk on 0.005 lot)
 input double RiskRewardRatio   = 1.8;     // TP = SL * RR
 input int    MaxOpenTrades     = 1;       // Max simultaneous positions
 input int    CooldownMinutes   = 15;      // Minutes between trades
@@ -24,6 +24,7 @@ input bool   EnableVolPause    = false;   // Pause on volatile hour edges
 CTrade   trade;
 datetime lastTradeTime  = 0;
 datetime lastAlivePrint = 0;
+datetime lastDiagBar    = 0;   // tracks last M5 bar for diagnostic logging
 int      h1MAHandle     = INVALID_HANDLE;
 
 //─── OnInit ──────────────────────────────────────────────────────────────────
@@ -44,8 +45,10 @@ int OnInit()
       return INIT_FAILED;
    }
 
+   lastAlivePrint = TimeCurrent();   // prevent immediate heartbeat on startup
+
    Print("=================================================================");
-   Print("Cyy Scalping Bot v3.3 | Symbol: ", _Symbol);
+   Print("Cyy Scalping Bot v3.4 | Symbol: ", _Symbol);
    Print("Balance : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
    Print("Equity  : ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),  2));
    Print("Vol pause: ", EnableVolPause ? "ON" : "OFF");
@@ -208,11 +211,26 @@ void OnTick()
    if(IsCooldownActive())                  return;
    if(!IsSpreadAcceptable())               return;
 
-   // Signal pipeline
-   int signal = GetBreakoutSignal();
-   if(signal == 0) return;
-   if(GetH1TrendDirection() != signal) return;
-   if(!IsPullbackAfterBreakout(signal)) return;
+   // Signal pipeline — with per-candle diagnostic logging
+   int signal   = GetBreakoutSignal();
+   int h1Trend  = GetH1TrendDirection();
+   bool pullback = (signal != 0) && IsPullbackAfterBreakout(signal);
+
+   datetime barTime = iTime(_Symbol, PERIOD_M5, 1);
+   if(barTime != lastDiagBar)
+   {
+      lastDiagBar = barTime;
+      string why = "WAITING";
+      if     (signal == 0)              why = "No breakout (candles mixed)";
+      else if(h1Trend != signal)        why = "H1 trend mismatch (breakout=" + (string)signal + " H1=" + (string)h1Trend + ")";
+      else if(!pullback)                why = "Pullback too small (<" + (string)PullbackPips + " pips)";
+      else                              why = "ALL CLEAR — placing trade";
+      Print("Diag | breakout=", signal, " H1=", h1Trend, " pullback=", pullback, " | ", why);
+   }
+
+   if(signal == 0)              return;
+   if(h1Trend != signal)        return;
+   if(!pullback)                return;
 
    // Calculate SL / TP distances
    double point      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
