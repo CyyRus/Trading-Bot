@@ -1,5 +1,5 @@
 #property copyright "Cyy XAUUSD Survival Scalping Bot"
-#property version   "3.5"
+#property version   "3.6"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -15,6 +15,7 @@ input int    MagicNumber       = 12345;
 
 input double MaxSpreadPoints   = 50;      // Max allowed spread (points)
 input string AllowedSymbol     = "XAUUSD";
+input int    D1TrendMAPeriod   = 50;      // D1 EMA period — daily trend gate
 input int    H1TrendMAPeriod   = 50;      // H1 EMA period for trend filter
 input int    ConfirmCandles    = 2;       // Breakout confirmation candles
 input int    PullbackPips      = 10;      // Required pullback depth (pips)
@@ -25,6 +26,7 @@ CTrade   trade;
 datetime lastTradeTime  = 0;
 datetime lastAlivePrint = 0;
 datetime lastDiagBar    = 0;   // tracks last M5 bar for diagnostic logging
+int      d1MAHandle     = INVALID_HANDLE;
 int      h1MAHandle     = INVALID_HANDLE;
 
 //─── OnInit ──────────────────────────────────────────────────────────────────
@@ -38,6 +40,13 @@ int OnInit()
 
    trade.SetExpertMagicNumber(MagicNumber);
 
+   d1MAHandle = iMA(_Symbol, PERIOD_D1, D1TrendMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(d1MAHandle == INVALID_HANDLE)
+   {
+      Print("ERROR: Failed to create D1 MA handle");
+      return INIT_FAILED;
+   }
+
    h1MAHandle = iMA(_Symbol, PERIOD_H1, H1TrendMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
    if(h1MAHandle == INVALID_HANDLE)
    {
@@ -49,7 +58,7 @@ int OnInit()
 
    double effLot = NormalizeLot(LotSize);
    Print("=================================================================");
-   Print("Cyy Scalping Bot v3.5 | Symbol: ", _Symbol);
+   Print("Cyy Scalping Bot v3.6 | Symbol: ", _Symbol);
    Print("Balance    : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
    Print("Equity     : ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),  2));
    Print("LotSize    : ", DoubleToString(LotSize, 3),
@@ -64,6 +73,7 @@ int OnInit()
 //─── OnDeinit ────────────────────────────────────────────────────────────────
 void OnDeinit(const int reason)
 {
+   if(d1MAHandle != INVALID_HANDLE) IndicatorRelease(d1MAHandle);
    if(h1MAHandle != INVALID_HANDLE) IndicatorRelease(h1MAHandle);
    Print("Bot stopped | Reason: ", reason,
          " | Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
@@ -172,7 +182,21 @@ int GetBreakoutSignal()
    return 0;
 }
 
-// Returns the H1 trend: 1 = bullish (price > EMA), -1 = bearish, 0 = unknown.
+// Returns the D1 trend: 1 = bullish (price > D1 EMA), -1 = bearish, 0 = unknown.
+// This is the primary trend gate — prevents trading against the daily direction.
+int GetD1TrendDirection()
+{
+   double ma[];
+   ArraySetAsSeries(ma, true);
+   if(CopyBuffer(d1MAHandle, 0, 0, 1, ma) <= 0) return 0;
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid > ma[0]) return  1;
+   if(bid < ma[0]) return -1;
+   return 0;
+}
+
+// Returns the H1 trend: 1 = bullish (price > H1 EMA), -1 = bearish, 0 = unknown.
 int GetH1TrendDirection()
 {
    double ma[];
@@ -231,6 +255,7 @@ void OnTick()
 
    // Signal pipeline — with per-candle diagnostic logging
    int signal   = GetBreakoutSignal();
+   int d1Trend  = GetD1TrendDirection();
    int h1Trend  = GetH1TrendDirection();
    bool pullback = (signal != 0) && IsPullbackAfterBreakout(signal);
 
@@ -240,13 +265,15 @@ void OnTick()
       lastDiagBar = barTime;
       string why = "WAITING";
       if     (signal == 0)              why = "No breakout (candles mixed)";
+      else if(d1Trend != signal)        why = "D1 trend blocks trade (breakout=" + (string)signal + " D1=" + (string)d1Trend + ")";
       else if(h1Trend != signal)        why = "H1 trend mismatch (breakout=" + (string)signal + " H1=" + (string)h1Trend + ")";
       else if(!pullback)                why = "Pullback too small (<" + (string)PullbackPips + " pips)";
       else                              why = "ALL CLEAR — placing trade";
-      Print("Diag | breakout=", signal, " H1=", h1Trend, " pullback=", pullback, " | ", why);
+      Print("Diag | breakout=", signal, " D1=", d1Trend, " H1=", h1Trend, " pullback=", pullback, " | ", why);
    }
 
    if(signal == 0)              return;
+   if(d1Trend != signal)        return;   // daily trend gate — must align first
    if(h1Trend != signal)        return;
    if(!pullback)                return;
 
