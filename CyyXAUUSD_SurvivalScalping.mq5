@@ -1,5 +1,5 @@
 #property copyright "Cyy XAUUSD Survival Scalping Bot"
-#property version   "3.6"
+#property version   "3.7"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -58,7 +58,7 @@ int OnInit()
 
    double effLot = NormalizeLot(LotSize);
    Print("=================================================================");
-   Print("Cyy Scalping Bot v3.6 | Symbol: ", _Symbol);
+   Print("Cyy Scalping Bot v3.7 | Symbol: ", _Symbol);
    Print("Balance    : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
    Print("Equity     : ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),  2));
    Print("LotSize    : ", DoubleToString(LotSize, 3),
@@ -264,17 +264,16 @@ void OnTick()
    {
       lastDiagBar = barTime;
       string why = "WAITING";
-      if     (signal == 0)              why = "No breakout (candles mixed)";
-      else if(d1Trend != signal)        why = "D1 trend blocks trade (breakout=" + (string)signal + " D1=" + (string)d1Trend + ")";
-      else if(h1Trend != signal)        why = "H1 trend mismatch (breakout=" + (string)signal + " H1=" + (string)h1Trend + ")";
-      else if(!pullback)                why = "Pullback too small (<" + (string)PullbackPips + " pips)";
-      else                              why = "ALL CLEAR — placing trade";
-      Print("Diag | breakout=", signal, " D1=", d1Trend, " H1=", h1Trend, " pullback=", pullback, " | ", why);
+      if     (signal == 0)       why = "No breakout (candles mixed)";
+      else if(d1Trend != signal) why = "D1 trend blocks trade (breakout=" + (string)signal + " D1=" + (string)d1Trend + ")";
+      else if(!pullback)         why = "Pullback too small (<" + (string)PullbackPips + " pips)";
+      else                       why = "ALL CLEAR — placing trade";
+      // H1 shown for info only — not a gate; it lags too much during D1 trend dips
+      Print("Diag | breakout=", signal, " D1=", d1Trend, " H1=", h1Trend, "(info) pullback=", pullback, " | ", why);
    }
 
    if(signal == 0)              return;
-   if(d1Trend != signal)        return;   // daily trend gate — must align first
-   if(h1Trend != signal)        return;
+   if(d1Trend != signal)        return;   // daily trend gate — sole direction filter
    if(!pullback)                return;
 
    // Calculate SL / TP distances
