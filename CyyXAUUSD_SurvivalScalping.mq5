@@ -1,12 +1,12 @@
 #property copyright "Cyy XAUUSD Survival Scalping Bot"
-#property version   "3.7"
+#property version   "3.8"
 #property strict
 
 #include <Trade\Trade.mqh>
 
 //─── Inputs ──────────────────────────────────────────────────────────────────
 input double LotSize           = 0.005;   // Lot size
-input int    StopLossPips      = 30;      // Stop loss in pips (reduced: ~$1.50 risk on 0.005 lot)
+input int    StopLossPips      = 30;      // Stop loss in pips
 input double RiskRewardRatio   = 1.8;     // TP = SL * RR
 input int    MaxOpenTrades     = 1;       // Max simultaneous positions
 input int    CooldownMinutes   = 15;      // Minutes between trades
@@ -16,16 +16,23 @@ input int    MagicNumber       = 12345;
 input double MaxSpreadPoints   = 50;      // Max allowed spread (points)
 input string AllowedSymbol     = "XAUUSD";
 input int    D1TrendMAPeriod   = 50;      // D1 EMA period — daily trend gate
-input int    H1TrendMAPeriod   = 50;      // H1 EMA period for trend filter
+input int    H1TrendMAPeriod   = 50;      // H1 EMA period (info only)
 input int    ConfirmCandles    = 2;       // Breakout confirmation candles
 input int    PullbackPips      = 10;      // Required pullback depth (pips)
 input bool   EnableVolPause    = false;   // Pause on volatile hour edges
+
+// Exit management
+input int    BreakevenPips     = 10;   // Move SL to entry once floating profit hits this
+input int    TrailStartPips    = 18;   // Begin trailing SL at this profit level
+input int    TrailStepPips     = 8;    // Keep SL this many pips behind current price
+input int    MomentumExitPips  = 8;    // Early-exit threshold: if losing >= this AND last M5 candle opposes trade, close now
 
 //─── Globals ─────────────────────────────────────────────────────────────────
 CTrade   trade;
 datetime lastTradeTime  = 0;
 datetime lastAlivePrint = 0;
-datetime lastDiagBar    = 0;   // tracks last M5 bar for diagnostic logging
+datetime lastDiagBar    = 0;
+datetime lastExitBar    = 0;   // tracks last M5 bar for momentum-exit check
 int      d1MAHandle     = INVALID_HANDLE;
 int      h1MAHandle     = INVALID_HANDLE;
 
@@ -54,17 +61,19 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   lastAlivePrint = TimeCurrent();   // prevent immediate heartbeat on startup
+   lastAlivePrint = TimeCurrent();
 
    double effLot = NormalizeLot(LotSize);
    Print("=================================================================");
-   Print("Cyy Scalping Bot v3.7 | Symbol: ", _Symbol);
+   Print("Cyy Scalping Bot v3.8 | Symbol: ", _Symbol);
    Print("Balance    : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
    Print("Equity     : ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),  2));
    Print("LotSize    : ", DoubleToString(LotSize, 3),
          " -> effective: ", DoubleToString(effLot, 3),
          " (min=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 3),
          " step=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), 3), ")");
+   Print("Breakeven  : +", BreakevenPips, " pips | Trail start: +", TrailStartPips,
+         " pips | Trail step: ", TrailStepPips, " pips | MomentumExit: -", MomentumExitPips, " pips");
    Print("Vol pause  : ", EnableVolPause ? "ON" : "OFF");
    Print("=================================================================");
    return INIT_SUCCEEDED;
@@ -146,7 +155,6 @@ bool IsSpreadAcceptable()
    return true;
 }
 
-// Snaps a desired lot size to the broker's valid min/step/max for this symbol.
 double NormalizeLot(double desiredLot)
 {
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -159,10 +167,103 @@ double NormalizeLot(double desiredLot)
    return NormalizeDouble(lot, 2);
 }
 
+//─── Trade management (called every tick while a position is open) ────────────
+// Three layers:
+//   1. Breakeven : once price moves BreakevenPips in our favour, lock SL at entry.
+//   2. Trail     : once TrailStartPips in profit, keep SL TrailStepPips behind price.
+//   3. Momentum exit : once per new M5 candle — if we are losing >= MomentumExitPips
+//                      AND the last closed candle opposes the trade, close early.
+void ManageOpenTrades()
+{
+   double pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10;
+   bool   newBar = false;
+   datetime barTime = iTime(_Symbol, PERIOD_M5, 1);
+   if(barTime != lastExitBar) { lastExitBar = barTime; newBar = true; }
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)    continue;
+
+      long   posType = PositionGetInteger(POSITION_TYPE);
+      double entry   = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl      = PositionGetDouble(POSITION_SL);
+      double tp      = PositionGetDouble(POSITION_TP);
+      double bid     = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double ask     = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+      // floating P&L in pips (positive = profit)
+      double floatPips = (posType == POSITION_TYPE_BUY)
+                         ? (bid - entry) / pip
+                         : (entry - ask) / pip;
+
+      // ── Layer 1: Breakeven ───────────────────────────────────────────────
+      if(floatPips >= BreakevenPips)
+      {
+         double beSL = (posType == POSITION_TYPE_BUY)
+                       ? NormalizeDouble(entry + pip, _Digits)   // 1 pip above entry
+                       : NormalizeDouble(entry - pip, _Digits);  // 1 pip below entry
+
+         bool needsMove = (posType == POSITION_TYPE_BUY  && (sl == 0 || sl < entry))
+                       || (posType == POSITION_TYPE_SELL && (sl == 0 || sl > entry));
+         if(needsMove)
+         {
+            if(trade.PositionModify(ticket, beSL, tp))
+               Print("Breakeven locked | ticket: ", ticket,
+                     " | SL: ", sl, " -> ", beSL,
+                     " | float: +", DoubleToString(floatPips, 1), " pips");
+            else
+               Print("Breakeven modify failed | error: ", GetLastError());
+         }
+      }
+
+      // ── Layer 2: Trailing stop ───────────────────────────────────────────
+      if(floatPips >= TrailStartPips)
+      {
+         double trailDist = TrailStepPips * pip;
+         double newSL     = (posType == POSITION_TYPE_BUY)
+                            ? NormalizeDouble(bid - trailDist, _Digits)
+                            : NormalizeDouble(ask + trailDist, _Digits);
+
+         bool improves = (posType == POSITION_TYPE_BUY  && newSL > sl)
+                      || (posType == POSITION_TYPE_SELL && (sl == 0 || newSL < sl));
+         if(improves)
+         {
+            if(trade.PositionModify(ticket, newSL, tp))
+               Print("Trail moved | ticket: ", ticket,
+                     " | SL: ", sl, " -> ", newSL,
+                     " | float: +", DoubleToString(floatPips, 1), " pips");
+            else
+               Print("Trail modify failed | error: ", GetLastError());
+         }
+      }
+
+      // ── Layer 3: Momentum exit (once per candle) ─────────────────────────
+      // If we are losing >= MomentumExitPips AND the last closed M5 candle
+      // moves further against us, don't wait for the full SL — exit now.
+      if(newBar && floatPips <= -MomentumExitPips)
+      {
+         double cClose = iClose(_Symbol, PERIOD_M5, 1);
+         double cOpen  = iOpen (_Symbol, PERIOD_M5, 1);
+         bool opposes  = (posType == POSITION_TYPE_BUY  && cClose < cOpen)   // bearish candle on a buy
+                      || (posType == POSITION_TYPE_SELL && cClose > cOpen);   // bullish candle on a sell
+
+         if(opposes)
+         {
+            if(trade.PositionClose(ticket))
+               Print("Momentum exit | ticket: ", ticket,
+                     " | float: ", DoubleToString(floatPips, 1), " pips",
+                     " | candle opposed trade direction");
+            else
+               Print("Momentum exit failed | ticket: ", ticket, " | error: ", GetLastError());
+         }
+      }
+   }
+}
+
 //─── Strategy ────────────────────────────────────────────────────────────────
-// Returns  1 if the last ConfirmCandles (starting at index 2) are all bullish,
-//         -1 if all bearish, 0 otherwise.
-// Candle index 1 is reserved as the pullback candle and is NOT counted here.
 int GetBreakoutSignal()
 {
    int bulls = 0, bears = 0;
@@ -182,8 +283,6 @@ int GetBreakoutSignal()
    return 0;
 }
 
-// Returns the D1 trend: 1 = bullish (price > D1 EMA), -1 = bearish, 0 = unknown.
-// This is the primary trend gate — prevents trading against the daily direction.
 int GetD1TrendDirection()
 {
    double ma[];
@@ -196,7 +295,6 @@ int GetD1TrendDirection()
    return 0;
 }
 
-// Returns the H1 trend: 1 = bullish (price > H1 EMA), -1 = bearish, 0 = unknown.
 int GetH1TrendDirection()
 {
    double ma[];
@@ -209,16 +307,11 @@ int GetH1TrendDirection()
    return 0;
 }
 
-// Returns true when candle 1 (most recent closed candle) has pulled back
-// against the breakout direction by at least PullbackPips from candle 2
-// (the last breakout candle). Candles 1 and 2 are separate from the
-// ConfirmCandles breakout window (indices 2..2+ConfirmCandles-1), so there
-// is no overlap between breakout detection and pullback detection.
 bool IsPullbackAfterBreakout(int signal)
 {
    double pip           = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10;
-   double close1        = iClose(_Symbol, PERIOD_M5, 1);   // pullback candle
-   double closeBreakout = iClose(_Symbol, PERIOD_M5, 2);   // last breakout candle
+   double close1        = iClose(_Symbol, PERIOD_M5, 1);
+   double closeBreakout = iClose(_Symbol, PERIOD_M5, 2);
 
    if(signal ==  1) return (closeBreakout - close1) > PullbackPips * pip;
    if(signal == -1) return (close1 - closeBreakout) > PullbackPips * pip;
@@ -247,6 +340,9 @@ void OnTick()
       return;
    }
 
+   // Manage any open positions first (runs every tick)
+   ManageOpenTrades();
+
    // Pre-trade guards
    if(CountOpenTrades()  >= MaxOpenTrades) return;
    if(IsVolatileTime())                    return;
@@ -268,19 +364,18 @@ void OnTick()
       else if(d1Trend != signal) why = "D1 trend blocks trade (breakout=" + (string)signal + " D1=" + (string)d1Trend + ")";
       else if(!pullback)         why = "Pullback too small (<" + (string)PullbackPips + " pips)";
       else                       why = "ALL CLEAR — placing trade";
-      // H1 shown for info only — not a gate; it lags too much during D1 trend dips
       Print("Diag | breakout=", signal, " D1=", d1Trend, " H1=", h1Trend, "(info) pullback=", pullback, " | ", why);
    }
 
-   if(signal == 0)              return;
-   if(d1Trend != signal)        return;   // daily trend gate — sole direction filter
-   if(!pullback)                return;
+   if(signal == 0)         return;
+   if(d1Trend != signal)   return;
+   if(!pullback)           return;
 
-   // Calculate SL / TP distances
-   double point      = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   // Calculate SL / TP
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    if(point == 0) return;
-   double slDist = StopLossPips                    * point * 10;
-   double tpDist = StopLossPips * RiskRewardRatio  * point * 10;
+   double slDist = StopLossPips                   * point * 10;
+   double tpDist = StopLossPips * RiskRewardRatio * point * 10;
 
    double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
