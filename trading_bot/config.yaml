@@ -1,0 +1,98 @@
+# Tom Hougaard Trading Bot - Configuration
+# ===========================================
+
+# Broker settings
+broker:
+  name: "alpaca"  # Options: "alpaca", "ccxt"
+  paper_trading: true  # Set to false for live trading
+  api_key: "YOUR_API_KEY"
+  api_secret: "YOUR_API_SECRET"
+  base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
+  # For live trading: https://api.alpaca.markets
+  ccxt_exchange: "binance"  # Used only when broker.name = "ccxt"
+
+# Instruments to trade
+instruments:
+  - symbol: "DAX"
+    display_name: "DAX40"
+    type: "index"
+    tick_size: 0.5
+    point_value: 1.0
+    session_open_utc: "08:00"  # 9:00 AM CET = 08:00 UTC (winter), 07:00 UTC (summer)
+    timezone: "Europe/Berlin"
+  - symbol: "US30"
+    display_name: "Dow Jones / US30"
+    type: "index"
+    tick_size: 1.0
+    point_value: 1.0
+    session_open_utc: "14:30"  # 9:30 AM EST = 14:30 UTC
+    timezone: "America/New_York"
+
+# Risk management
+risk:
+  max_risk_per_trade_pct: 1.0      # Risk no more than 1% of account per trade
+  daily_loss_limit_pct: 2.0        # Stop trading if down 2% on the day
+  max_trades_per_session: 2        # Max trades per session per instrument
+  trailing_stop_trigger_r: 1.5     # Activate trailing stop after 1.5R profit
+  never_average_down: true
+  skip_marginal_after_loss: true   # Skip next marginal setup after a loss
+
+# Account settings
+account:
+  initial_balance: 10000.0        # Starting account balance (paper)
+  currency: "USD"
+
+# Breakout Strategy settings
+breakout:
+  enabled: true
+  opening_range_minutes: 15        # Time window to form opening range
+  session_trade_window_minutes: 90 # Only trade within first 90 min of session open
+  max_candle_size_multiplier: 2.0  # Skip if breakout candle > 2x avg candle size
+  avg_candle_lookback: 20          # Candles to average for size filter
+
+# Scenario-Based Strategy settings
+scenario:
+  enabled: true
+  # Scenario A: Mon high > Tue high AND Mon high > Wed high → SHORT on Thursday
+  scenario_a_enabled: true
+  # Scenario B: Thu high > Fri high → gap-down on Monday SHORT at Friday close
+  scenario_b_enabled: true
+
+# Mind the Gap Strategy settings
+mind_the_gap:
+  enabled: true
+  min_gap_ticks: 10                # Minimum gap size to trade (ticks)
+  max_gap_ticks: 50                # Maximum gap size to trade (avoid huge gaps)
+  take_profit_at_prev_close: true  # TP at previous session close level
+
+# Trend Filter (62 EMA) settings
+trend_filter:
+  enabled: true
+  ema_period: 62
+  require_ema_slope: true          # EMA must slope in direction of trade
+
+# Data settings
+data:
+  timeframe: "5min"                # Candle timeframe for strategies
+  lookback_candles: 200            # Number of historical candles to load
+  csv_data_path: "data/"           # Path for backtesting CSV files
+
+# Logging settings
+logging:
+  log_level: "INFO"                # DEBUG, INFO, WARNING, ERROR
+  log_dir: "logs/"
+  error_log_file: "logs/error.log"
+  trade_log_file: "logs/trades.log"
+  console_colors: true             # Color-coded console output
+
+# Database settings
+database:
+  path: "trading_bot.db"
+
+# Backtesting settings
+backtesting:
+  enabled: false                   # Set to true to run backtesting mode
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+  initial_balance: 10000.0
+  commission_per_trade: 2.0        # Commission in account currency
