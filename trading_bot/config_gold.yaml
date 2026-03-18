@@ -1,0 +1,112 @@
+# ══════════════════════════════════════════════════════════════════════
+# Tom Hougaard Trading Bot — Gold (XAUUSD) on MetaTrader 5
+# ══════════════════════════════════════════════════════════════════════
+# Symbol note: most MT5 brokers use "XAUUSD". Some use "GOLD" or
+# "XAUUSDm". Check your broker's Market Watch and adjust below.
+
+# ── Broker ────────────────────────────────────────────────────────────
+broker:
+  name: "mt5"
+  paper_trading: true          # true = demo account; false = live
+
+  # MT5 terminal credentials (leave blank to use already-logged-in terminal)
+  mt5_login: 0                 # your MT5 account number (integer)
+  mt5_password: ""             # your MT5 password
+  mt5_server: ""               # e.g. "ICMarkets-Demo"
+  mt5_path: ""                 # optional: path to terminal64.exe
+                               # e.g. "C:/Program Files/MetaTrader 5/terminal64.exe"
+  slippage: 10                 # max slippage in points
+
+# ── Instrument ────────────────────────────────────────────────────────
+instruments:
+  - symbol: "XAUUSD"
+    display_name: "Gold / US Dollar"
+    type: "forex_metal"
+
+    # Gold tick / point info (verify with your broker)
+    tick_size: 0.01            # minimum price move for XAUUSD
+    point_value: 1.0           # $ per point per 1 standard lot
+                               # (1 lot Gold = 100 oz × $1 move = $100)
+    contract_size: 100         # ounces per standard lot
+
+    # Gold is essentially 24/5 — we use London open as primary session
+    # London open  : 08:00 UTC (07:00 UTC DST summer)
+    # New York open: 13:30 UTC
+    session_open_utc: "08:00"  # London session open (UTC)
+    ny_open_utc: "13:30"       # NY session open (UTC)
+    timezone: "Europe/London"
+
+# ── Account ───────────────────────────────────────────────────────────
+account:
+  initial_balance: 10000.0    # used if balance cannot be fetched
+  currency: "USD"
+
+# ── Risk Management ───────────────────────────────────────────────────
+risk:
+  max_risk_per_trade_pct: 1.0       # 1% of equity per trade
+  daily_loss_limit_pct: 2.0         # stop trading if down 2% on the day
+  max_trades_per_session: 2         # max entries per session per symbol
+  trailing_stop_trigger_r: 1.5      # activate trailing stop at 1.5R
+  never_average_down: true
+  skip_marginal_after_loss: true    # skip next marginal setup after a loss
+
+# ── Breakout Strategy ─────────────────────────────────────────────────
+breakout:
+  enabled: true
+  opening_range_minutes: 15         # first 15 min after session open = OR
+  session_trade_window_minutes: 90  # only trade within 90 min of open
+  max_candle_size_multiplier: 2.0   # skip if breakout candle > 2× avg size
+  avg_candle_lookback: 20           # candles used to compute avg size
+
+# Gold-specific note:
+# On a 5-min chart, Gold average candle is roughly $1.50–$3.00.
+# The 2× filter prevents entering on spike candles of $6+.
+
+# ── Scenario-Based Strategy ───────────────────────────────────────────
+scenario:
+  enabled: true
+  scenario_a_enabled: true   # Mon>Tue+Wed highs → SHORT Thu
+  scenario_b_enabled: true   # Thu>Fri high → SHORT Friday close
+
+# ── Mind the Gap ──────────────────────────────────────────────────────
+mind_the_gap:
+  enabled: true
+  # Gold gaps are measured in USD (price units), 1 tick = $0.01
+  # 10 ticks = $0.10 minimum gap; 100 ticks = $1.00 maximum gap
+  # Adjust to taste — Gold gaps at session open can be 50 cents to $5+
+  min_gap_ticks: 20          # minimum gap: 20 × $0.01 = $0.20
+  max_gap_ticks: 200         # maximum gap: 200 × $0.01 = $2.00
+  take_profit_at_prev_close: true
+
+# ── Trend Filter (62 EMA) ─────────────────────────────────────────────
+trend_filter:
+  enabled: true
+  ema_period: 62
+  require_ema_slope: true    # EMA must slope in trade direction
+
+# ── Data ──────────────────────────────────────────────────────────────
+data:
+  timeframe: "5min"          # M5 candles (MT5: TIMEFRAME_M5)
+  daily_timeframe: "1d"      # D1 for scenario strategy
+  lookback_candles: 200      # bars to load per request
+  csv_data_path: "data/"
+
+# ── Logging ───────────────────────────────────────────────────────────
+logging:
+  log_level: "INFO"
+  log_dir: "logs/"
+  error_log_file: "logs/error.log"
+  trade_log_file: "logs/trades_gold.log"
+  console_colors: true
+
+# ── Database ──────────────────────────────────────────────────────────
+database:
+  path: "gold_trades.db"
+
+# ── Backtesting ───────────────────────────────────────────────────────
+backtesting:
+  enabled: false
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+  initial_balance: 10000.0
+  commission_per_trade: 3.0  # approximate round-trip commission for Gold
