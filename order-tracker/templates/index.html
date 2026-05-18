@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Order Tracker</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3e;
+    --accent: #4f8ef7;
+    --green: #22c55e;
+    --yellow: #f59e0b;
+    --orange: #f97316;
+    --red: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 20px; font-weight: 700; color: var(--accent); }
+  header span { color: var(--muted); font-size: 13px; }
+
+  .container { max-width: 1300px; margin: 0 auto; padding: 24px; }
+
+  /* Stats */
+  .stats { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 20px; flex: 1; min-width: 130px; }
+  .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .stat .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .stat.total .value { color: var(--accent); }
+  .stat.pending .value { color: var(--muted); }
+  .stat.warehouse .value { color: var(--yellow); }
+  .stat.shipped .value { color: var(--orange); }
+  .stat.delivered .value { color: var(--green); }
+
+  /* Add order form */
+  .add-form { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .add-form h2 { font-size: 15px; font-weight: 600; margin-bottom: 14px; color: var(--text); }
+  .form-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .form-row input, .form-row textarea {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 12px; font-size: 13px; flex: 1; min-width: 140px;
+    outline: none; transition: border .2s;
+  }
+  .form-row input:focus, .form-row textarea:focus { border-color: var(--accent); }
+  .form-row input::placeholder { color: var(--muted); }
+  .btn { padding: 8px 18px; border-radius: 6px; border: none; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity .2s; }
+  .btn:hover { opacity: .85; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  /* Search/filter bar */
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .toolbar input { background: var(--surface); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 12px; font-size: 13px; width: 240px; outline: none; }
+  .toolbar input:focus { border-color: var(--accent); }
+  .filter-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .filter-tab { padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: none; transition: all .2s; }
+  .filter-tab:hover, .filter-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; }
+  thead { background: var(--surface); }
+  th { padding: 12px 14px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); white-space: nowrap; }
+  td { padding: 12px 14px; border-top: 1px solid var(--border); vertical-align: middle; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .badge-pending  { background: rgba(100,116,139,.2); color: var(--muted); }
+  .badge-warehouse{ background: rgba(245,158,11,.15); color: var(--yellow); }
+  .badge-shipped  { background: rgba(249,115,22,.15); color: var(--orange); }
+  .badge-delivered{ background: rgba(34,197,94,.15);  color: var(--green);  }
+
+  .stage-cell { display: flex; align-items: center; gap: 6px; }
+  .stage-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot-empty   { background: var(--border); }
+  .dot-done    { background: var(--green); }
+
+  /* Inline edit */
+  .editable { cursor: pointer; border-bottom: 1px dashed var(--border); }
+  .editable:hover { border-color: var(--accent); color: var(--accent); }
+  .edit-form { display: none; }
+  .edit-form.open { display: flex; gap: 4px; align-items: center; }
+  .edit-form input { background: var(--bg); border: 1px solid var(--accent); color: var(--text); border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 160px; outline: none; }
+  .edit-cancel { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Order Tracker</h1>
+  <span>Warehouse → Belize</span>
+</header>
+
+<div class="container">
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat total">
+      <div class="label">Total Orders</div>
+      <div class="value">{{ stats.total }}</div>
+    </div>
+    <div class="stat pending">
+      <div class="label">Pending Arrival</div>
+      <div class="value">{{ stats.pending }}</div>
+    </div>
+    <div class="stat warehouse">
+      <div class="label">At Warehouse</div>
+      <div class="value">{{ stats.at_warehouse }}</div>
+    </div>
+    <div class="stat shipped">
+      <div class="label">Shipped to Belize</div>
+      <div class="value">{{ stats.shipped }}</div>
+    </div>
+    <div class="stat delivered">
+      <div class="label">Arrived in Belize</div>
+      <div class="value">{{ stats.delivered }}</div>
+    </div>
+  </div>
+
+  <!-- Add Order -->
+  <div class="add-form">
+    <h2>+ Add New Order</h2>
+    <form method="POST" action="/add">
+      <div class="form-row">
+        <input name="customer" placeholder="Customer name" required />
+        <input name="order_number" placeholder="Order #" required />
+        <input name="tracking_number" placeholder="Tracking # (optional)" />
+        <input name="notes" placeholder="Notes (optional)" />
+        <button type="submit" class="btn btn-primary">Add Order</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Search + Filter -->
+  <div class="toolbar">
+    <form method="GET" action="/">
+      <input name="search" value="{{ search }}" placeholder="Search customer, order #, tracking #..." />
+    </form>
+    <div class="filter-tabs">
+      <a href="/?search={{ search }}" class="filter-tab {% if not status_filter %}active{% endif %}">All</a>
+      <a href="/?status=pending_warehouse&search={{ search }}" class="filter-tab {% if status_filter=='pending_warehouse' %}active{% endif %}">Pending Arrival</a>
+      <a href="/?status=at_warehouse&search={{ search }}" class="filter-tab {% if status_filter=='at_warehouse' %}active{% endif %}">At Warehouse</a>
+      <a href="/?status=shipped&search={{ search }}" class="filter-tab {% if status_filter=='shipped' %}active{% endif %}">Shipped</a>
+      <a href="/?status=delivered&search={{ search }}" class="filter-tab {% if status_filter=='delivered' %}active{% endif %}">Delivered</a>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Order #</th>
+          <th>Tracking #</th>
+          <th>Status</th>
+          <th>Arrived Warehouse</th>
+          <th>Shipped to Belize</th>
+          <th>Arrived Belize</th>
+          <th>Notes</th>
+          <th>Created</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if orders %}
+          {% for o in orders %}
+          <tr>
+            <!-- Customer -->
+            <td>
+              <span class="editable" onclick="startEdit(this, {{ o.id }}, 'customer', '{{ o.customer|e }}')">{{ o.customer }}</span>
+              <span class="edit-form" id="ef-customer-{{ o.id }}">
+                <form method="POST" action="/update/{{ o.id }}" style="display:flex;gap:4px">
+                  <input type="hidden" name="field" value="customer" />
+                  <input name="value" value="{{ o.customer|e }}" />
+                  <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                  <button type="button" class="edit-cancel" onclick="cancelEdit('customer', {{ o.id }})">✕</button>
+                </form>
+              </span>
+            </td>
+
+            <!-- Order # -->
+            <td><strong>{{ o.order_number }}</strong></td>
+
+            <!-- Tracking # -->
+            <td>
+              {% if o.tracking_number %}
+                <span class="editable" onclick="startEdit(this, {{ o.id }}, 'tracking_number', '{{ o.tracking_number|e }}')">{{ o.tracking_number }}</span>
+              {% else %}
+                <span class="editable muted" style="color:var(--muted)" onclick="startEdit(this, {{ o.id }}, 'tracking_number', '')">— add</span>
+              {% endif %}
+              <span class="edit-form" id="ef-tracking_number-{{ o.id }}">
+                <form method="POST" action="/update/{{ o.id }}" style="display:flex;gap:4px">
+                  <input type="hidden" name="field" value="tracking_number" />
+                  <input name="value" value="{{ o.tracking_number or '' }}" placeholder="Tracking #" />
+                  <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                  <button type="button" class="edit-cancel" onclick="cancelEdit('tracking_number', {{ o.id }})">✕</button>
+                </form>
+              </span>
+            </td>
+
+            <!-- Status badge -->
+            <td>
+              {% if o.arrived_belize %}
+                <span class="badge badge-delivered">Delivered</span>
+              {% elif o.shipped_to_belize %}
+                <span class="badge badge-shipped">Shipped</span>
+              {% elif o.arrived_warehouse %}
+                <span class="badge badge-warehouse">At Warehouse</span>
+              {% else %}
+                <span class="badge badge-pending">Pending</span>
+              {% endif %}
+            </td>
+
+            <!-- Arrived Warehouse -->
+            <td>
+              {% if o.arrived_warehouse %}
+                <div class="stage-cell">
+                  <div class="stage-dot dot-done"></div>
+                  <span class="editable" onclick="startEdit(this, {{ o.id }}, 'arrived_warehouse', '{{ o.arrived_warehouse }}')">{{ o.arrived_warehouse }}</span>
+                </div>
+              {% else %}
+                <form method="POST" action="/update/{{ o.id }}" style="display:inline">
+                  <input type="hidden" name="field" value="arrived_warehouse" />
+                  <input type="hidden" name="value" id="now-aw-{{ o.id }}" />
+                  <button type="submit" class="btn btn-primary btn-sm" onclick="setNow('now-aw-{{ o.id }}')">Mark arrived</button>
+                </form>
+              {% endif %}
+              <span class="edit-form" id="ef-arrived_warehouse-{{ o.id }}">
+                <form method="POST" action="/update/{{ o.id }}" style="display:flex;gap:4px">
+                  <input type="hidden" name="field" value="arrived_warehouse" />
+                  <input name="value" value="{{ o.arrived_warehouse or '' }}" placeholder="YYYY-MM-DD" />
+                  <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                  <button type="button" class="edit-cancel" onclick="cancelEdit('arrived_warehouse', {{ o.id }})">✕</button>
+                </form>
+              </span>
+            </td>
+
+            <!-- Shipped to Belize -->
+            <td>
+              {% if o.shipped_to_belize %}
+                <div class="stage-cell">
+                  <div class="stage-dot dot-done"></div>
+                  <span class="editable" onclick="startEdit(this, {{ o.id }}, 'shipped_to_belize', '{{ o.shipped_to_belize }}')">{{ o.shipped_to_belize }}</span>
+                </div>
+              {% else %}
+                <form method="POST" action="/update/{{ o.id }}" style="display:inline">
+                  <input type="hidden" name="field" value="shipped_to_belize" />
+                  <input type="hidden" name="value" id="now-sb-{{ o.id }}" />
+                  <button type="submit" class="btn btn-primary btn-sm" onclick="setNow('now-sb-{{ o.id }}')">Mark shipped</button>
+                </form>
+              {% endif %}
+              <span class="edit-form" id="ef-shipped_to_belize-{{ o.id }}">
+                <form method="POST" action="/update/{{ o.id }}" style="display:flex;gap:4px">
+                  <input type="hidden" name="field" value="shipped_to_belize" />
+                  <input name="value" value="{{ o.shipped_to_belize or '' }}" placeholder="YYYY-MM-DD" />
+                  <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                  <button type="button" class="edit-cancel" onclick="cancelEdit('shipped_to_belize', {{ o.id }})">✕</button>
+                </form>
+              </span>
+            </td>
+
+            <!-- Arrived Belize -->
+            <td>
+              {% if o.arrived_belize %}
+                <div class="stage-cell">
+                  <div class="stage-dot dot-done"></div>
+                  <span class="editable" onclick="startEdit(this, {{ o.id }}, 'arrived_belize', '{{ o.arrived_belize }}')">{{ o.arrived_belize }}</span>
+                </div>
+              {% else %}
+                <form method="POST" action="/update/{{ o.id }}" style="display:inline">
+                  <input type="hidden" name="field" value="arrived_belize" />
+                  <input type="hidden" name="value" id="now-ab-{{ o.id }}" />
+                  <button type="submit" class="btn btn-primary btn-sm" onclick="setNow('now-ab-{{ o.id }}')">Mark arrived</button>
+                </form>
+              {% endif %}
+              <span class="edit-form" id="ef-arrived_belize-{{ o.id }}">
+                <form method="POST" action="/update/{{ o.id }}" style="display:flex;gap:4px">
+                  <input type="hidden" name="field" value="arrived_belize" />
+                  <input name="value" value="{{ o.arrived_belize or '' }}" placeholder="YYYY-MM-DD" />
+                  <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                  <button type="button" class="edit-cancel" onclick="cancelEdit('arrived_belize', {{ o.id }})">✕</button>
+                </form>
+              </span>
+            </td>
+
+            <!-- Notes -->
+            <td style="max-width:160px">
+              {% if o.notes %}
+                <span class="editable" onclick="startEdit(this, {{ o.id }}, 'notes', '{{ o.notes|e }}')">{{ o.notes }}</span>
+              {% else %}
+                <span style="color:var(--muted);cursor:pointer" onclick="startEdit(this, {{ o.id }}, 'notes', '')">—</span>
+              {% endif %}
+              <span class="edit-form" id="ef-notes-{{ o.id }}">
+                <form method="POST" action="/update/{{ o.id }}" style="display:flex;gap:4px">
+                  <input type="hidden" name="field" value="notes" />
+                  <input name="value" value="{{ o.notes or '' }}" placeholder="Notes..." />
+                  <button type="submit" class="btn btn-primary btn-sm">Save</button>
+                  <button type="button" class="edit-cancel" onclick="cancelEdit('notes', {{ o.id }})">✕</button>
+                </form>
+              </span>
+            </td>
+
+            <!-- Created -->
+            <td style="color:var(--muted);white-space:nowrap">{{ o.created_at[:10] }}</td>
+
+            <!-- Delete -->
+            <td>
+              <form method="POST" action="/delete/{{ o.id }}" onsubmit="return confirm('Delete this order?')">
+                <button type="submit" class="btn btn-danger btn-sm">✕</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr><td colspan="10">
+            <div class="empty-state">
+              <div class="icon">📦</div>
+              <div>No orders found. Add one above.</div>
+            </div>
+          </td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+function setNow(inputId) {
+  const d = new Date();
+  const s = d.getFullYear() + '-' +
+    String(d.getMonth()+1).padStart(2,'0') + '-' +
+    String(d.getDate()).padStart(2,'0');
+  document.getElementById(inputId).value = s;
+}
+
+function startEdit(el, id, field, current) {
+  el.style.display = 'none';
+  const ef = document.getElementById('ef-' + field + '-' + id);
+  ef.classList.add('open');
+  ef.querySelector('input[name="value"]').value = current;
+  ef.querySelector('input[name="value"]').focus();
+}
+
+function cancelEdit(field, id) {
+  const ef = document.getElementById('ef-' + field + '-' + id);
+  ef.classList.remove('open');
+  // show the original span back
+  const prev = ef.previousElementSibling;
+  if (prev) prev.style.display = '';
+}
+
+// Auto-submit search on input change
+const searchInput = document.querySelector('.toolbar input[name="search"]');
+if (searchInput) {
+  let timer;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => searchInput.closest('form').submit(), 400);
+  });
+}
+</script>
+</body>
+</html>
