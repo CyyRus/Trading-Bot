@@ -1,12 +1,14 @@
 #property copyright "Cyy XAUUSD Survival Scalping Bot"
-#property version   "4.0"
+#property version   "5.0"
 #property strict
 
 #include <Trade\Trade.mqh>
 
 //─── Inputs ──────────────────────────────────────────────────────────────────
 input group "=== Position Sizing ==="
-input double LotSize                 = 0.005;  // Lot size
+input bool   UseRiskPercent          = true;   // Size lots by % equity risk (recommended)
+input double RiskPercent             = 1.0;    // % of equity to risk per trade (if UseRiskPercent)
+input double LotSize                 = 0.01;   // Fixed lot size (used only if UseRiskPercent = false)
 input int    MagicNumber             = 12345;  // EA identifier (unique per chart)
 input int    MaxOpenTrades           = 1;      // Max simultaneous positions
 
@@ -18,6 +20,10 @@ input int    BreakevenPips           = 5;      // Move SL to entry once profit h
 input int    TrailStartPips          = 10;     // Begin trailing SL at this profit level
 input int    TrailStepPips           = 6;      // Keep SL this many pips behind price
 input int    MomentumExitPips        = 8;      // Early-exit if losing >= this AND opposing M5 candle
+
+input group "=== Daily Risk Limits ==="
+input double DailyLossLimitPct       = 2.0;    // Pause new trades if equity down this % vs day start
+input int    MaxTradesPerDay         = 8;      // Max new entries per day (0 = unlimited)
 
 input group "=== Entry Filters ==="
 input int    D1TrendMAPeriod         = 50;     // D1 EMA period (trend gate)
@@ -37,6 +43,9 @@ input bool   EnableSessionFilter     = true;   // Only trade during active marke
 input int    SessionStartHour        = 8;      // UTC hour to start (London open)
 input int    SessionEndHour          = 22;     // UTC hour to stop  (NY close)
 
+input group "=== Trailing Stop Tuning ==="
+input double MinTrailStepPoints      = 10;     // Min SL move (points) before re-modifying position
+
 input group "=== Misc ==="
 input bool   EnableVolPause          = false;  // Pause on volatile hour-edge minutes
 input int    MaxSlippagePoints       = 30;     // Max slippage on market orders
@@ -54,6 +63,12 @@ int      d1MAHandle         = INVALID_HANDLE;
 bool     quickReentryArmed  = false;
 datetime quickReentryArmedAt = 0;
 
+// Daily risk tracking
+double   dayStartEquity     = 0.0;
+datetime currentDayStart    = 0;
+int      tradesToday        = 0;
+bool     dailyLimitHit      = false;
+
 //─── OnInit ──────────────────────────────────────────────────────────────────
 int OnInit()
 {
@@ -65,6 +80,7 @@ int OnInit()
 
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(MaxSlippagePoints);   // slippage protection
+   trade.SetTypeFilling(DetectFillingMode());
 
    d1MAHandle = iMA(_Symbol, PERIOD_D1, D1TrendMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
    if(d1MAHandle == INVALID_HANDLE)
@@ -73,20 +89,31 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   lastAlivePrint = TimeCurrent();
-   double effLot  = NormalizeLot(LotSize);
+   lastAlivePrint  = TimeCurrent();
+   currentDayStart = StartOfDay(TimeCurrent());
+   dayStartEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double effLot = NormalizeLot(LotSize);
 
    Print("=================================================================");
-   Print("Cyy Scalping Bot v4.0 | Symbol: ", _Symbol);
+   Print("Cyy Scalping Bot v5.0 | Symbol: ", _Symbol);
    Print("Balance     : ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
-   Print("LotSize     : ", DoubleToString(effLot, 3),
-         " (min=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 3),
-         " step=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), 3), ")");
+   if(UseRiskPercent)
+      Print("Sizing      : ", DoubleToString(RiskPercent, 2), "% equity risk per trade");
+   else
+      Print("Sizing      : ", DoubleToString(effLot, 3), " fixed lots",
+            " (min=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), 3),
+            " step=", DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP), 3), ")");
    Print("QuickTP     : ", QuickTPPips > 0 ? (string)QuickTPPips + " pips" : "RR ratio (" + DoubleToString(RiskRewardRatio,1) + "x)");
    Print("ReEntry     : ", EnableQuickReentry ? (string)QuickReentrySeconds + "s after profit | timeout " + (string)QuickReentryTimeoutMin + "min" : "OFF");
    Print("Session     : ", EnableSessionFilter ? (string)SessionStartHour + ":00-" + (string)SessionEndHour + ":00 UTC" : "24/7");
    Print("Breakeven   : +", BreakevenPips, "p | Trail: +", TrailStartPips, "p start / ", TrailStepPips, "p step");
+   Print("DailyLimit  : -", DoubleToString(DailyLossLimitPct, 2), "% | MaxTrades/day: ",
+         MaxTradesPerDay == 0 ? "unlimited" : (string)MaxTradesPerDay);
    Print("Slippage    : max ", MaxSlippagePoints, " points");
+   if(QuickTPPips > 0 && QuickTPPips < StopLossPips)
+      Print("NOTE: TP(", QuickTPPips, "p) < SL(", StopLossPips, "p) — needs a high win rate;",
+            " momentum exit (Layer 3) is relied on to cap losers early.");
    Print("=================================================================");
    return INIT_SUCCEEDED;
 }
@@ -224,6 +251,79 @@ double NormalizeLot(double desiredLot)
    return NormalizeDouble(lot, 2);
 }
 
+// Pick the order filling mode the broker actually supports for this symbol.
+// Avoids "Unsupported filling mode" errors on brokers that don't allow IOC/FOK.
+ENUM_ORDER_TYPE_FILLING DetectFillingMode()
+{
+   int filling = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((filling & SYMBOL_FILLING_FOK) != 0) return ORDER_FILLING_FOK;
+   if((filling & SYMBOL_FILLING_IOC) != 0) return ORDER_FILLING_IOC;
+   return ORDER_FILLING_RETURN;
+}
+
+datetime StartOfDay(datetime t)
+{
+   MqlDateTime tm;
+   TimeToStruct(t, tm);
+   tm.hour = 0; tm.min = 0; tm.sec = 0;
+   return StructToTime(tm);
+}
+
+// A new SL must be at least SYMBOL_TRADE_STOPS_LEVEL points away from the
+// current price, otherwise the broker rejects the modify request.
+bool IsStopDistanceValid(double refPrice, double stopPrice)
+{
+   long stopsLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel <= 0) return true;
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   return MathAbs(refPrice - stopPrice) >= stopsLevel * point;
+}
+
+//─── Daily Risk Tracking ─────────────────────────────────────────────────────
+void CheckDailyReset()
+{
+   datetime today = StartOfDay(TimeCurrent());
+   if(today == currentDayStart) return;
+
+   currentDayStart = today;
+   dayStartEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   tradesToday     = 0;
+   dailyLimitHit   = false;
+   Print("=== New trading day | Equity reset point: ", DoubleToString(dayStartEquity, 2), " ===");
+}
+
+bool IsDailyLossLimitHit()
+{
+   if(dailyLimitHit) return true;
+   if(dayStartEquity <= 0) return false;
+
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double lossPct = (dayStartEquity - equity) / dayStartEquity * 100.0;
+   if(lossPct >= DailyLossLimitPct)
+   {
+      dailyLimitHit = true;
+      Print("DAILY LOSS LIMIT HIT (-", DoubleToString(lossPct, 2),
+            "%) — pausing new entries until next day");
+   }
+   return dailyLimitHit;
+}
+
+//─── Position Sizing ─────────────────────────────────────────────────────────
+// Risk-percent sizing for Gold: 1 standard lot = 100 oz, so a $1 move on
+// 1 lot = $100 P&L. lots = risk_usd / (stop_distance_price x contract_size)
+double CalcLotSize(double slDistPrice)
+{
+   if(!UseRiskPercent || slDistPrice <= 0)
+      return NormalizeLot(LotSize);
+
+   double equity   = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskUsd  = equity * RiskPercent / 100.0;
+   double contract = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   if(contract <= 0) contract = 100.0;
+
+   return NormalizeLot(riskUsd / (slDistPrice * contract));
+}
+
 //─── Trade Management ────────────────────────────────────────────────────────
 // Three exit layers run every tick while a position is open:
 //   1. Breakeven  — lock SL at entry once floating profit >= BreakevenPips
@@ -231,7 +331,8 @@ double NormalizeLot(double desiredLot)
 //   3. Momentum   — close early if underwater >= MomentumExitPips + opposing M5 candle
 void ManageOpenTrades()
 {
-   double pip    = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10;
+   double point  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double pip    = point * 10;
    bool   newBar = false;
    datetime barTime = iTime(_Symbol, PERIOD_M5, 1);
    if(barTime != lastExitBar) { lastExitBar = barTime; newBar = true; }
@@ -263,7 +364,12 @@ void ManageOpenTrades()
                         || (posType == POSITION_TYPE_SELL && (sl < 1e-10 || sl > entry));
          if(needsMove)
          {
-            if(trade.PositionModify(ticket, beSL, tp))
+            double refPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
+            if(!IsStopDistanceValid(refPrice, beSL))
+            {
+               // Too close to current price — broker would reject; retry next tick.
+            }
+            else if(trade.PositionModify(ticket, beSL, tp))
                Print("Breakeven | #", ticket, " SL:", sl, "->", beSL,
                      " float:+", DoubleToString(floatPips, 1), "p");
             else
@@ -284,9 +390,19 @@ void ManageOpenTrades()
          // Use 1e-10 epsilon instead of == 0 to handle floating-point edge cases
          bool improves = (posType == POSITION_TYPE_BUY  && (sl < 1e-10 || newSL > sl))
                       || (posType == POSITION_TYPE_SELL && (sl < 1e-10 || newSL < sl));
-         if(improves)
+
+         // Only re-modify once the SL has moved by a meaningful amount —
+         // avoids spamming PositionModify on every tick of a slow drift.
+         bool bigEnough = (sl < 1e-10) || (MathAbs(newSL - sl) >= MinTrailStepPoints * point);
+
+         if(improves && bigEnough)
          {
-            if(trade.PositionModify(ticket, newSL, tp))
+            double refPrice = (posType == POSITION_TYPE_BUY) ? bid : ask;
+            if(!IsStopDistanceValid(refPrice, newSL))
+            {
+               // Too close to current price — broker would reject; retry next tick.
+            }
+            else if(trade.PositionModify(ticket, newSL, tp))
                Print("Trail | #", ticket, " SL:", sl, "->", newSL,
                      " float:+", DoubleToString(floatPips, 1), "p");
             else
@@ -375,8 +491,14 @@ bool PlaceTrade(int direction, string label)
 
    double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double effLot = NormalizeLot(LotSize);
+   double effLot = CalcLotSize(slDist);
    bool   ok     = false;
+
+   if(effLot <= 0)
+   {
+      Print("PlaceTrade aborted | computed lot size <= 0");
+      return false;
+   }
 
    if(direction == 1)
    {
@@ -398,6 +520,8 @@ bool PlaceTrade(int direction, string label)
             " (", QuickTPPips > 0 ? (string)QuickTPPips + "p" : "RR", ")",
             ok ? "" : " err:" + (string)GetLastError());
    }
+
+   if(ok) tradesToday++;
    return ok;
 }
 
@@ -406,12 +530,18 @@ void OnTick()
 {
    datetime now = TimeCurrent();
 
+   CheckDailyReset();
+
    // Hourly heartbeat
    if(now - lastAlivePrint >= 3600)
    {
+      double equity    = AccountInfoDouble(ACCOUNT_EQUITY);
+      double dayPnlPct = (dayStartEquity > 0) ? (equity - dayStartEquity) / dayStartEquity * 100.0 : 0.0;
       Print("Alive | Bal:", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2),
-            " Eq:", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2),
+            " Eq:", DoubleToString(equity, 2),
             " Open:", CountOpenTrades(),
+            " TradesToday:", tradesToday, "/", MaxTradesPerDay == 0 ? "unlimited" : (string)MaxTradesPerDay,
+            " DayPnL:", DoubleToString(dayPnlPct, 2), "%",
             " ReEntry:", quickReentryArmed ? "ARMED" : "off");
       lastAlivePrint = now;
    }
@@ -432,6 +562,8 @@ void OnTick()
    if(IsVolatileTime())                   return;
    if(IsCooldownActive())                 return;
    if(!IsSpreadAcceptable())              return;
+   if(IsDailyLossLimitHit())              return;
+   if(MaxTradesPerDay > 0 && tradesToday >= MaxTradesPerDay) return;
 
    // Quick re-entry timeout: disarm if we've been waiting too long
    if(quickReentryArmed &&
