@@ -46,6 +46,10 @@ input int    SessionEndHour          = 22;     // UTC hour to stop  (NY close)
 input group "=== Trailing Stop Tuning ==="
 input double MinTrailStepPoints      = 10;     // Min SL move (points) before re-modifying position
 
+input group "=== Telegram Alerts ==="
+input string TelegramToken   = "";               // Bot token from @BotFather (enter in MT5 inputs — never committed to git)
+input string TelegramChatId  = "-1003791739104"; // Channel chat ID
+
 input group "=== Misc ==="
 input bool   EnableVolPause          = false;  // Pause on volatile hour-edge minutes
 input int    MaxSlippagePoints       = 30;     // Max slippage on market orders
@@ -114,6 +118,11 @@ int OnInit()
    if(QuickTPPips > 0 && QuickTPPips < StopLossPips)
       Print("NOTE: TP(", QuickTPPips, "p) < SL(", StopLossPips, "p) — needs a high win rate;",
             " momentum exit (Layer 3) is relied on to cap losers early.");
+   if(TelegramToken != "")
+      Print("Telegram   : ENABLED | channel: ", TelegramChatId,
+            " — ensure https://api.telegram.org is in MT5 allowed URLs");
+   else
+      Print("Telegram   : disabled (paste token in EA inputs to enable)");
    Print("=================================================================");
    return INIT_SUCCEEDED;
 }
@@ -155,6 +164,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       Print("Loss/BE close | P&L: ", DoubleToString(profit, 2),
             " | Normal cooldown: ", NormalCooldownMin, "min");
    }
+
+   string outcome = profit > 0 ? "CLOSED WIN" : (profit < 0 ? "CLOSED LOSS" : "CLOSED BE");
+   string sign    = profit >= 0 ? "+" : "";
+   SendTelegramAlert(outcome + " XAUUSD\n"
+                     "P&L: " + sign + DoubleToString(profit, 2) + " | " +
+                     TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES));
 }
 
 //─── Helpers ─────────────────────────────────────────────────────────────────
@@ -279,6 +294,45 @@ bool IsStopDistanceValid(double refPrice, double stopPrice)
    return MathAbs(refPrice - stopPrice) >= stopsLevel * point;
 }
 
+//─── Telegram Alerts ─────────────────────────────────────────────────────────
+string _UrlEncode(string text)
+{
+   string result = "";
+   int len = StringLen(text);
+   for(int i = 0; i < len; i++)
+   {
+      ushort c = StringGetCharacter(text, i);
+      if((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+         result += ShortToString(c);
+      else
+         result += StringFormat("%%%02X", c);
+   }
+   return result;
+}
+
+void SendTelegramAlert(string msg)
+{
+   if(TelegramToken == "" || TelegramChatId == "") return;
+
+   string url        = "https://api.telegram.org/bot" + TelegramToken + "/sendMessage";
+   string params     = "chat_id=" + _UrlEncode(TelegramChatId) + "&text=" + _UrlEncode(msg);
+   string headers    = "Content-Type: application/x-www-form-urlencoded\r\n";
+   string resHeaders = "";
+   char   post[], result[];
+
+   StringToCharArray(params, post, 0, StringLen(params));
+   int sz = ArraySize(post);
+   if(sz > 0 && post[sz - 1] == 0) ArrayResize(post, sz - 1);
+
+   int code = WebRequest("POST", url, headers, 5000, post, result, resHeaders);
+   if(code == -1)
+      Print("Telegram: WebRequest failed err:", GetLastError(),
+            " — add https://api.telegram.org to MT5 allowed URLs (Tools > Options > Expert Advisors)");
+   else if(code != 200)
+      Print("Telegram: HTTP ", code, " — check token / chat_id");
+}
+
 //─── Daily Risk Tracking ─────────────────────────────────────────────────────
 void CheckDailyReset()
 {
@@ -304,6 +358,9 @@ bool IsDailyLossLimitHit()
       dailyLimitHit = true;
       Print("DAILY LOSS LIMIT HIT (-", DoubleToString(lossPct, 2),
             "%) — pausing new entries until next day");
+      SendTelegramAlert("DAILY LIMIT HIT XAUUSD\n"
+                        "Loss: -" + DoubleToString(lossPct, 2) + "% | "
+                        "Trading paused until next day");
    }
    return dailyLimitHit;
 }
@@ -500,10 +557,12 @@ bool PlaceTrade(int direction, string label)
       return false;
    }
 
+   double sl = 0, tp = 0;
+
    if(direction == 1)
    {
-      double sl = NormalizeDouble(ask - slDist, _Digits);
-      double tp = NormalizeDouble(ask + tpDist, _Digits);
+      sl = NormalizeDouble(ask - slDist, _Digits);
+      tp = NormalizeDouble(ask + tpDist, _Digits);
       ok = trade.Buy(effLot, _Symbol, ask, sl, tp, label);
       Print(ok ? "BUY" : "BUY FAILED",
             " | lot:", effLot, " ask:", ask, " SL:", sl, " TP:", tp,
@@ -512,8 +571,8 @@ bool PlaceTrade(int direction, string label)
    }
    else
    {
-      double sl = NormalizeDouble(bid + slDist, _Digits);
-      double tp = NormalizeDouble(bid - tpDist, _Digits);
+      sl = NormalizeDouble(bid + slDist, _Digits);
+      tp = NormalizeDouble(bid - tpDist, _Digits);
       ok = trade.Sell(effLot, _Symbol, bid, sl, tp, label);
       Print(ok ? "SELL" : "SELL FAILED",
             " | lot:", effLot, " bid:", bid, " SL:", sl, " TP:", tp,
@@ -521,7 +580,22 @@ bool PlaceTrade(int direction, string label)
             ok ? "" : " err:" + (string)GetLastError());
    }
 
-   if(ok) tradesToday++;
+   if(ok)
+   {
+      double price = (direction == 1) ? ask : bid;
+      string dir   = (direction == 1) ? "BUY" : "SELL";
+      string sizing = UseRiskPercent
+                      ? "Risk: " + DoubleToString(RiskPercent, 1) + "% equity"
+                      : "Fixed: " + DoubleToString(effLot, 3) + " lot";
+      SendTelegramAlert("=== " + dir + " XAUUSD ===\n"
+                        "Entry: " + DoubleToString(price, _Digits) +
+                        " | SL: "  + DoubleToString(sl, _Digits) +
+                        " | TP: "  + DoubleToString(tp, _Digits) + "\n"
+                        "Lot: "    + DoubleToString(effLot, 3) + " | " + sizing + "\n"
+                        "Strategy: " + label + " | " +
+                        TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES));
+      tradesToday++;
+   }
    return ok;
 }
 
