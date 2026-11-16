@@ -73,6 +73,17 @@ datetime currentDayStart    = 0;
 int      tradesToday        = 0;
 bool     dailyLimitHit      = false;
 
+// Daily/weekly performance (for Telegram summaries)
+int      winsToday          = 0;
+int      lossesToday        = 0;
+double   pnlToday           = 0.0;
+int      weekTrades         = 0;
+int      weekWins           = 0;
+int      weekLosses         = 0;
+double   weekPnL            = 0.0;
+double   weekStartEquity    = 0.0;
+datetime currentWeekStart   = 0;
+
 //─── OnInit ──────────────────────────────────────────────────────────────────
 int OnInit()
 {
@@ -93,9 +104,11 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   lastAlivePrint  = TimeCurrent();
-   currentDayStart = StartOfDay(TimeCurrent());
-   dayStartEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   lastAlivePrint    = TimeCurrent();
+   currentDayStart   = StartOfDay(TimeCurrent());
+   currentWeekStart  = StartOfWeek(TimeCurrent());
+   dayStartEquity    = AccountInfoDouble(ACCOUNT_EQUITY);
+   weekStartEquity   = dayStartEquity;
 
    double effLot = NormalizeLot(LotSize);
 
@@ -164,6 +177,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       Print("Loss/BE close | P&L: ", DoubleToString(profit, 2),
             " | Normal cooldown: ", NormalCooldownMin, "min");
    }
+
+   // Update daily/weekly performance counters
+   if(profit > 0)      { winsToday++;   weekWins++;   }
+   else if(profit < 0) { lossesToday++; weekLosses++; }
+   pnlToday += profit;
+   weekPnL  += profit;
 
    string outcome = profit > 0 ? "CLOSED WIN" : (profit < 0 ? "CLOSED LOSS" : "CLOSED BE");
    string sign    = profit >= 0 ? "+" : "";
@@ -284,6 +303,18 @@ datetime StartOfDay(datetime t)
    return StructToTime(tm);
 }
 
+datetime StartOfWeek(datetime t)
+{
+   MqlDateTime tm;
+   TimeToStruct(t, tm);
+   // day_of_week: 0=Sun 1=Mon ... 6=Sat — roll back to Monday
+   int daysBack = (tm.day_of_week == 0) ? 6 : (tm.day_of_week - 1);
+   datetime mon = t - (datetime)(daysBack * 86400);
+   TimeToStruct(mon, tm);
+   tm.hour = 0; tm.min = 0; tm.sec = 0;
+   return StructToTime(tm);
+}
+
 // A new SL must be at least SYMBOL_TRADE_STOPS_LEVEL points away from the
 // current price, otherwise the broker rejects the modify request.
 bool IsStopDistanceValid(double refPrice, double stopPrice)
@@ -339,9 +370,60 @@ void CheckDailyReset()
    datetime today = StartOfDay(TimeCurrent());
    if(today == currentDayStart) return;
 
+   // ── Post daily summary before resetting ──────────────────────────────────
+   if(tradesToday > 0)
+   {
+      int    be      = tradesToday - winsToday - lossesToday;
+      string wrStr   = DoubleToString(tradesToday > 0 ? (double)winsToday / tradesToday * 100.0 : 0.0, 1);
+      string sign    = pnlToday >= 0 ? "+" : "";
+      double pnlPct  = dayStartEquity > 0 ? pnlToday / dayStartEquity * 100.0 : 0.0;
+      SendTelegramAlert("DAILY RECAP XAUUSD | " + TimeToString(currentDayStart, TIME_DATE) + "\n"
+                        "Trades: " + (string)tradesToday +
+                        " | W: "   + (string)winsToday +
+                        " / L: "   + (string)lossesToday +
+                        (be > 0 ? " / BE: " + (string)be : "") +
+                        " | WR: "  + wrStr + "%\n"
+                        "P&L: "    + sign + DoubleToString(pnlToday, 2) +
+                        " (" + sign + DoubleToString(pnlPct, 2) + "%)\n"
+                        "Balance: " + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2));
+   }
+
+   // Accumulate into weekly totals
+   weekTrades += tradesToday;
+   weekWins   += winsToday;
+   weekLosses += lossesToday;
+   weekPnL    += pnlToday;
+
+   // ── New week? Post weekly summary and reset weekly counters ───────────────
+   datetime newWeek = StartOfWeek(today);
+   if(newWeek != currentWeekStart)
+   {
+      if(weekTrades > 0)
+      {
+         string wkWR   = DoubleToString(weekTrades > 0 ? (double)weekWins / weekTrades * 100.0 : 0.0, 1);
+         string wkSign = weekPnL >= 0 ? "+" : "";
+         double wkPct  = weekStartEquity > 0 ? weekPnL / weekStartEquity * 100.0 : 0.0;
+         SendTelegramAlert("WEEKLY RECAP XAUUSD\n"
+                           "Week of " + TimeToString(currentWeekStart, TIME_DATE) + "\n"
+                           "Trades: " + (string)weekTrades +
+                           " | W: "   + (string)weekWins +
+                           " / L: "   + (string)weekLosses +
+                           " | WR: "  + wkWR + "%\n"
+                           "Net P&L: " + wkSign + DoubleToString(weekPnL, 2) +
+                           " (" + wkSign + DoubleToString(wkPct, 2) + "%)");
+      }
+      weekTrades = 0; weekWins = 0; weekLosses = 0; weekPnL = 0.0;
+      currentWeekStart = newWeek;
+      weekStartEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   }
+
+   // ── Reset daily counters ──────────────────────────────────────────────────
    currentDayStart = today;
    dayStartEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
    tradesToday     = 0;
+   winsToday       = 0;
+   lossesToday     = 0;
+   pnlToday        = 0.0;
    dailyLimitHit   = false;
    Print("=== New trading day | Equity reset point: ", DoubleToString(dayStartEquity, 2), " ===");
 }
